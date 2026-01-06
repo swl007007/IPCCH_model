@@ -1,0 +1,59 @@
+# Output and debug files
+*.txt
+*.pdf
+*.png
+*.log
+*.csv
+
+# Compiled and cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Claude Code specific
+.claude/
+CLAUDE.md
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/*
+
+# Python virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# IDE specific
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Model outputs and predictions
+forecasting_prediction/
+nowcasting_prediction/
+output_region_models_debug/
+outputs/
+feature_importance/
+*.pkl
+*.joblib
+*.h5
+*.hdf5
+
+# Data files (uncomment if you want to ignore data)
+# *.csv
+# *.json
+
+# Other common output formats
+*.xlsx
+*.xls
+*.html
+*.xml
