@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 Region-Sliced Forecasting Workflow
-Trains independent XGBoost models for each of 6 regions across 3 years (2022, 2023, 2024).
-Total: 18 model-training runs (3 years x 6 regions).
+Trains independent XGBoost models for each region across multiple years.
+Regions are auto-detected from the mapping file (supports 1-20 regions).
+Total runs = (number of years) × (number of regions detected).
 """
 
 import argparse
@@ -32,7 +33,7 @@ def load_inputs(
     hyperparam_p3_path: str,
     lat_lon_path: str,
     seed: int
-) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, Dict, Dict]:
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, Dict, Dict, List[int]]:
     """
     Load all required inputs with validation.
 
@@ -42,6 +43,7 @@ def load_inputs(
         - lat_lon_lookup: area_id -> lat, lon mapping
         - hyperparams: XGBoost params for phases 2,4,5
         - hyperparams_p3: XGBoost params for phase 3
+        - unique_regions: Sorted list of unique region IDs from mapping file
     """
     print("=" * 80)
     print("LOADING INPUTS")
@@ -88,10 +90,15 @@ def load_inputs(
 
     region_map = region_map.sort_values('area_id').reset_index(drop=True)
     unique_regions = sorted(region_map['region'].unique())
-    print(f"  [OK] Unique regions: {unique_regions}")
 
-    if not all(r in range(0, 6) for r in unique_regions):
-        print(f"  [WARNING] Expected regions 0-5, found: {unique_regions}")
+    # Validate region count
+    if len(unique_regions) < 1:
+        raise ValueError("No regions found in mapping file. Check 'region' column.")
+
+    if len(unique_regions) > 20:
+        raise ValueError(f"Found {len(unique_regions)} regions. Maximum supported: 20.")
+
+    print(f"  [OK] Found {len(unique_regions)} unique regions: {unique_regions}")
 
     # Load lat/lon lookup
     print(f"\nLoading lat/lon lookup from: {lat_lon_path}")
@@ -127,7 +134,7 @@ def load_inputs(
     print(f"\n  [OK] Random seed set to: {seed}")
     print("=" * 80)
 
-    return df, region_map, lat_lon_lookup, hyperparams, hyperparams_p3
+    return df, region_map, lat_lon_lookup, hyperparams, hyperparams_p3, unique_regions
 
 
 def merge_region_keys(df: pd.DataFrame, region_map: pd.DataFrame) -> pd.DataFrame:
@@ -634,9 +641,14 @@ def run_one_region(
 # 4. AGGREGATION & METRICS
 # ============================================================================
 
-def concat_regional_predictions(year: int, output_dir: str) -> pd.DataFrame:
+def concat_regional_predictions(year: int, output_dir: str, regions: List[int]) -> pd.DataFrame:
     """
     Concatenate all regional predictions for a year.
+
+    Args:
+        year: Year to concatenate
+        output_dir: Output directory containing predictions/
+        regions: List of region IDs to process
 
     Returns:
         Combined predictions DataFrame
@@ -648,7 +660,7 @@ def concat_regional_predictions(year: int, output_dir: str) -> pd.DataFrame:
     dfs = []
     total_rows = 0
 
-    for region in range(0, 6):
+    for region in regions:
         pred_path = os.path.join(output_dir, 'predictions', f'predictions_{year}_{region}.csv')
 
         if os.path.exists(pred_path):
@@ -783,7 +795,7 @@ def main():
     """
     # Parse CLI arguments
     parser = argparse.ArgumentParser(
-        description='Region-sliced forecasting workflow (18 runs: 3 years x 6 regions)'
+        description='Region-sliced forecasting workflow with auto-detected regions'
     )
     parser.add_argument('--dataset', required=True,
                        help='Path to main CSV dataset')
@@ -814,11 +826,10 @@ def main():
     print(f"  Output directory: {args.out}")
     print(f"  Years: {args.years}")
     print(f"  Random seed: {args.seed}")
-    print(f"  Total runs: {len(args.years)} years x 6 regions = {len(args.years) * 6}")
     print("=" * 80)
 
     # 1. Load inputs
-    df, region_map, lat_lon_lookup, hyperparams, hyperparams_p3 = load_inputs(
+    df, region_map, lat_lon_lookup, hyperparams, hyperparams_p3, unique_regions = load_inputs(
         args.dataset,
         args.region_map,
         args.hyperparams,
@@ -826,6 +837,15 @@ def main():
         args.lat_lon_file,
         args.seed
     )
+
+    # Display region configuration
+    print(f"\n{'=' * 80}")
+    print("REGION CONFIGURATION")
+    print(f"{'=' * 80}")
+    print(f"  Detected regions: {len(unique_regions)}")
+    print(f"  Region IDs: {unique_regions}")
+    print(f"  Total runs: {len(args.years)} years × {len(unique_regions)} regions = {len(args.years) * len(unique_regions)}")
+    print(f"{'=' * 80}")
 
     # 2. Merge region keys and validate
     df = merge_region_keys(df, region_map)
@@ -853,11 +873,11 @@ def main():
     os.makedirs(os.path.join(args.out, 'predictions'), exist_ok=True)
     os.makedirs(os.path.join(args.out, 'metrics'), exist_ok=True)
 
-    # 5. Run 18 iterations (3 years x 6 regions)
+    # 5. Run year-region iterations (dynamic region count)
     results = []
 
     for year in args.years:
-        for region in range(0, 6):
+        for region in unique_regions:
             result = run_one_region(
                 df=df,
                 overall_phase_lookup=overall_phase_lookup,
@@ -878,7 +898,7 @@ def main():
     # 6. Aggregate predictions by year
     for year in args.years:
         try:
-            df_all = concat_regional_predictions(year, args.out)
+            df_all = concat_regional_predictions(year, args.out, unique_regions)
 
             # Compute metrics on the concatenated data (not per-region)
             compute_year_metrics(df_all, year, args.out)
@@ -909,7 +929,7 @@ def main():
         print(f"\n  [WARNING] {failed} run(s) failed. Check run_manifest.csv for details.")
 
     print("\nOutput files:")
-    print(f"  {args.out}/predictions/predictions_<year>_<region>.csv  (18 files)")
+    print(f"  {args.out}/predictions/predictions_<year>_<region>.csv  ({len(args.years) * len(unique_regions)} files)")
     print(f"  {args.out}/predictions/predictions_<year>_ALL_REGIONS.csv  (3 files)")
     print(f"  {args.out}/metrics/metrics_<year>_OVERALL.json  (3 files)")
     print(f"  {args.out}/run_manifest.csv")

@@ -7,7 +7,9 @@ Outputs: metrics CSV, delta CSVs (per year), delta bar charts (per year).
 """
 
 import argparse
+import glob
 import os
+import re
 import warnings
 from typing import Dict, List
 
@@ -22,6 +24,81 @@ plt.rcParams['figure.dpi'] = 200
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore')
+
+
+# ============================================================================
+# 0. REGION AUTO-DETECTION
+# ============================================================================
+
+def discover_regions_from_directory(regional_dir: str, years: List[int]) -> List[int]:
+    """
+    Auto-discover region IDs from prediction files in directory.
+
+    Scans for files matching pattern: predictions_{year}_{region}.csv
+    Extracts unique region identifiers across all years.
+
+    Args:
+        regional_dir: Directory containing regional prediction files
+        years: List of years to scan for
+
+    Returns:
+        Sorted list of unique region IDs (as integers)
+
+    Raises:
+        ValueError: If no valid region files found or region IDs are not numeric
+    """
+    print(f"\nAuto-detecting regions from {regional_dir}...")
+
+    # Pattern to match: predictions_*.csv
+    pattern = os.path.join(regional_dir, "predictions_*.csv")
+    files = glob.glob(pattern)
+
+    if not files:
+        raise ValueError(f"No prediction files found matching pattern: {pattern}")
+
+    # Regex to extract year and region from filename
+    # Matches: predictions_2022_0.csv, predictions_2023_15.csv, etc.
+    filename_pattern = re.compile(r'predictions_(\d{4})_(\d+)\.csv')
+
+    discovered_regions = set()
+    valid_files = []
+
+    for filepath in files:
+        filename = os.path.basename(filepath)
+
+        # Skip aggregate files like predictions_2022_ALL_REGIONS.csv
+        if 'ALL_REGIONS' in filename.upper():
+            continue
+
+        match = filename_pattern.match(filename)
+        if match:
+            year = int(match.group(1))
+            region = int(match.group(2))
+
+            # Only include regions from requested years
+            if year in years:
+                discovered_regions.add(region)
+                valid_files.append(filename)
+
+    if not discovered_regions:
+        raise ValueError(
+            f"No valid region files found for years {years}. "
+            f"Expected pattern: predictions_YYYY_R.csv where YYYY in {years} and R is region number"
+        )
+
+    # Convert to sorted list
+    regions = sorted(list(discovered_regions))
+
+    print(f"  [OK] Discovered {len(regions)} regions: {regions}")
+    print(f"  [OK] Found {len(valid_files)} valid prediction files")
+
+    # Validate region range
+    if len(regions) < 1:
+        raise ValueError("No regions discovered")
+    if len(regions) > 20:
+        print(f"  [WARNING] Found {len(regions)} regions (>20). This may impact visualization quality.")
+
+    return regions
 
 
 # ============================================================================
@@ -335,42 +412,108 @@ def make_delta_table(metrics_df: pd.DataFrame, year: int) -> pd.DataFrame:
 # 5. VISUALIZATION
 # ============================================================================
 
-def plot_grouped_bars(delta_df: pd.DataFrame, out_path: str, year: int, dpi: int = 200):
+def plot_grouped_bars(delta_df: pd.DataFrame, out_path: str, year: int,
+                     n_regions: int, dpi: int = 200):
     """
-    Create grouped bar chart: 6 regions × 4 metrics for a specific year.
+    Create grouped bar chart: N regions × 4 metrics for a specific year.
+
+    Layout adapts to number of regions:
+    - 1-8 regions: Single row
+    - 9-16 regions: Two rows (8 regions per row)
+    - 17-20 regions: Three rows (7-8 regions per row)
 
     Args:
         delta_df: Delta table for the year (region, metric, delta)
         out_path: Output PNG file path
         year: Year being plotted
+        n_regions: Total number of regions (for layout calculation)
         dpi: Plot resolution
-
-    X-axis: regions (0-5)
-    Y-axis: delta (regional - global)
-    Bars: grouped by metric
     """
     # Prepare data for plotting
     plot_df = delta_df.pivot(index='region', columns='metric', values='delta')
 
-    # Plot
-    fig, ax = plt.subplots(figsize=(12, 6))
-    plot_df.plot(kind='bar', ax=ax, width=0.8)
+    # Calculate layout based on number of regions
+    if n_regions <= 8:
+        # Single row layout
+        n_rows = 1
+        figsize = (12, 6)
+        regions_per_row = n_regions
+    elif n_regions <= 16:
+        # Two row layout (8 regions per row)
+        n_rows = 2
+        figsize = (14, 10)
+        regions_per_row = 8
+    else:
+        # Three row layout (7-8 regions per row for up to 20 regions)
+        n_rows = 3
+        figsize = (14, 14)
+        regions_per_row = 7
 
-    # Styling
-    ax.axhline(y=0, color='black', linestyle='-', linewidth=0.8)
-    ax.set_xlabel('Region', fontsize=12)
-    ax.set_ylabel('Delta (Regional - Global)', fontsize=12)
-    ax.set_title(f'Regional model − Global model performance by region ({year})',
-                fontsize=14, fontweight='bold')
-    ax.legend(title='Metric', loc='best')
-    ax.grid(axis='y', alpha=0.3)
+    # Create figure with subplots
+    fig, axes = plt.subplots(n_rows, 1, figsize=figsize)
 
-    # Rotate x labels
-    ax.set_xticklabels([f'Region {int(r)}' for r in plot_df.index], rotation=0)
+    # Handle single vs multiple subplots
+    if n_rows == 1:
+        axes = [axes]  # Wrap in list for consistent indexing
+
+    # Split regions across rows if needed
+    if n_regions <= 8:
+        # Single plot with all regions
+        plot_df.plot(kind='bar', ax=axes[0], width=0.8)
+
+        # Styling for single plot
+        axes[0].axhline(y=0, color='black', linestyle='-', linewidth=0.8)
+        axes[0].set_xlabel('Region', fontsize=12)
+        axes[0].set_ylabel('Delta (Regional - Global)', fontsize=12)
+        axes[0].set_title(f'Regional model − Global model performance by region ({year})',
+                         fontsize=14, fontweight='bold')
+        axes[0].legend(title='Metric', loc='best')
+        axes[0].grid(axis='y', alpha=0.3)
+        axes[0].set_xticklabels([f'Region {int(r)}' for r in plot_df.index],
+                               rotation=45 if n_regions > 6 else 0,
+                               ha='right' if n_regions > 6 else 'center')
+    else:
+        # Multi-row layout: split regions across subplots
+        regions_list = plot_df.index.tolist()
+
+        for row_idx in range(n_rows):
+            # Calculate region slice for this row
+            start_idx = row_idx * regions_per_row
+            end_idx = min(start_idx + regions_per_row, len(regions_list))
+
+            if start_idx >= len(regions_list):
+                # No more regions for this row - hide the subplot
+                axes[row_idx].set_visible(False)
+                continue
+
+            # Get regions for this row
+            row_regions = regions_list[start_idx:end_idx]
+            row_df = plot_df.loc[row_regions]
+
+            # Plot this row's data
+            row_df.plot(kind='bar', ax=axes[row_idx], width=0.8)
+
+            # Styling
+            axes[row_idx].axhline(y=0, color='black', linestyle='-', linewidth=0.8)
+            axes[row_idx].set_xlabel('Region', fontsize=11)
+            axes[row_idx].set_ylabel('Delta (Regional - Global)', fontsize=11)
+            axes[row_idx].legend(title='Metric', loc='best', fontsize=9)
+            axes[row_idx].grid(axis='y', alpha=0.3)
+            axes[row_idx].set_xticklabels([f'Region {int(r)}' for r in row_df.index],
+                                         rotation=45, ha='right', fontsize=9)
+
+            # Add row label for clarity
+            if row_idx == 0:
+                axes[row_idx].set_title(
+                    f'Regional model − Global model performance by region ({year})',
+                    fontsize=13, fontweight='bold', pad=10
+                )
 
     plt.tight_layout()
     plt.savefig(out_path, dpi=dpi, bbox_inches='tight')
     plt.close()
+
+    print(f"  [OK] Created visualization with {n_rows} row(s) for {n_regions} regions")
 
 
 # ============================================================================
@@ -406,7 +549,9 @@ def main():
 
     # 1. Load regional predictions
     print("\n[1/7] Loading regional predictions...")
-    regional_df = load_regional_predictions(args.regional_dir, args.years, range(6))
+    # Auto-detect regions from directory
+    discovered_regions = discover_regions_from_directory(args.regional_dir, args.years)
+    regional_df = load_regional_predictions(args.regional_dir, args.years, discovered_regions)
 
     # 2. Load global predictions
     print("\n[2/7] Loading global predictions...")
@@ -428,13 +573,19 @@ def main():
 
     metrics_df = compute_group_metrics(combined_df, group_by=['model', 'region', 'year'])
 
-    # Check coverage
-    expected_cells = 6 * 3 * 2  # 6 regions × 3 years × 2 models
+    # Check coverage (dynamically calculated)
+    n_regions = len(discovered_regions)
+    n_years = len(args.years)
+    n_models = 2  # global and regional
+    expected_cells = n_regions * n_years * n_models
     actual_cells = len(metrics_df)
     coverage = actual_cells / expected_cells * 100
+
     print(f"\n  Coverage: {actual_cells}/{expected_cells} cells ({coverage:.1f}%)")
+    print(f"  Expected: {n_regions} regions × {n_years} years × {n_models} models")
     if coverage < 90:
-        print(f"  [WARNING] Low coverage: {expected_cells - actual_cells} cells missing")
+        missing_cells = expected_cells - actual_cells
+        print(f"  [WARNING] Low coverage: {missing_cells} cells missing")
 
     # Save Product A
     out_metrics = os.path.join(args.out_dir, 'region_year_metrics_both_models.csv')
@@ -455,7 +606,7 @@ def main():
 
         # Plot for this year
         out_plot = os.path.join(args.out_dir, f'regional_minus_global_delta_by_region_{year}.png')
-        plot_grouped_bars(delta_df, out_plot, year, dpi=200)
+        plot_grouped_bars(delta_df, out_plot, year, n_regions=len(discovered_regions), dpi=200)
         print(f"  [OK] Saved: {out_plot}")
 
     # Print summary PER YEAR
